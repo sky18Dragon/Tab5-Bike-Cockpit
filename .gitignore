@@ -1,0 +1,19 @@
+.DS_Store
+
+# ESP-IDF
+firmware/build/
+firmware/managed_components/
+firmware/dependencies.lock
+firmware/sdkconfig
+firmware/sdkconfig.old
+
+# secrets (API keys, private server URLs)
+firmware/secrets.local
+
+# map data (large, personal use only, not distributed)
+tools/map-export/out/
+*.bin.tiles
+
+# editor
+.vscode/
+.idea/
