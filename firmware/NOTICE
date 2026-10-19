@@ -1,0 +1,13 @@
+Tab5-Bike-Cockpit firmware
+
+The application skeleton under main/, the CMake/Kconfig layout, partitions_16m.csv, idf_ext.py,
+littlefs/xiaozhi/*.mp3 and sdkconfig.defaults* are derived from the "chatbot" example of
+espressif/brookesia_agent_xiaozhi 0.7.4 (ESP-Brookesia), copyright Espressif Systems (Shanghai) CO LTD,
+licensed under Apache-2.0 (SPDX headers are kept in the source files). The generated SquareLine UI
+sources are licensed CC0-1.0 as stated in their headers.
+
+boards/m5stack_tab5/ is derived from espressif/esp_board_manager (boards/m5stack_tab5),
+copyright Espressif Systems (Shanghai) CO., LTD., SPDX: LicenseRef-Espressif-Modified-MIT
+(see the license shipped with the esp_board_manager component).
+
+Modifications by this project are listed in the git history.

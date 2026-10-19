@@ -1,0 +1,23 @@
+dependencies:
+  espressif/brookesia_agent_coze:
+    version: 0.7.*
+  espressif/brookesia_agent_openai:
+    version: 0.7.*
+  espressif/brookesia_agent_xiaozhi:
+    version: 0.7.*
+  espressif/brookesia_expression_emote:
+    version: 0.7.*
+  espressif/brookesia_hal_adaptor:
+    version: 0.7.*
+  espressif/brookesia_hal_boards:
+    version: 0.7.*
+  espressif/brookesia_service_audio:
+    version: 0.7.*
+  espressif/brookesia_service_nvs:
+    version: 0.7.*
+  espressif/brookesia_service_sntp:
+    version: 0.7.*
+  espressif/brookesia_service_wifi:
+    version: 0.7.*
+  espressif/esp_lvgl_adapter:
+    version: 0.5.*
