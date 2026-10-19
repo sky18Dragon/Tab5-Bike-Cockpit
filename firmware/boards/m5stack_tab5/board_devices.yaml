@@ -3,7 +3,9 @@ devices:
   - name: audio_dac
     chip: es8388
     type: audio_codec
-    depends_on: gpio_expander
+    # gpio_expander_2 holds WLAN_PWR_EN (ESP32-C6 power), USB5V_EN and CHG_EN (battery charging).
+    # Nothing else depends on it, so list it here to make sure it is initialised during boot.
+    depends_on: [gpio_expander, gpio_expander_2]
     version: default
     config:
       adc_enabled: false
@@ -75,9 +77,12 @@ devices:
       espressif/esp_io_expander_pi4ioe5v6408: "*"
     config:
       max_pins: 8
-      output_io_mask: [0, 1, 2, 3, 4, 5, 6]  # P1(SPK_EN), P2(EXT5V_EN), P4(LCD_RST), P5(TP_RST), P6(CAM_RST)
-      output_io_level_mask : [0, 1, 1, 0, 1, 1, 1]
-      output_io_mode_mask: [0, 0, 0, 0, 0, 0, 0]
+      # P1(SPK_EN), P2(EXT5V_EN), P5(TP_RST), P6(CAM_RST) are outputs.
+      # P4 (LCD_RST) is deliberately NOT listed: the panel side has no 1.8 V pull-up, so it must never be
+      # driven push-pull high. setup_device.c releases it as "input + pull-up" (official BSP sequence).
+      output_io_mask: [0, 1, 2, 3, 5, 6]
+      output_io_level_mask : [0, 1, 1, 0, 1, 1]
+      output_io_mode_mask: [0, 0, 0, 0, 0, 0]
       input_io_mask: [7]  # P7(HEAD_PHONE_DET)
     peripherals:
       - name: i2c_master
@@ -91,9 +96,13 @@ devices:
       espressif/esp_io_expander_pi4ioe5v6408: "*"
     config:
       max_pins: 8
-      output_io_mask: [0, 3, 4, 5, 6, 7]  # P1(WLAN_PWR_EN), P3(USB5V_EN)
-      output_io_level_mask : [1, 1, 0, 0, 0, 0]
-      output_io_mode_mask: [0, 0, 0, 0, 0, 0]
+      # P0(WLAN_PWR_EN)=1, P3(USB5V_EN)=1, P4(power-off signal)=0, P5(QC_EN, active low)=0,
+      # P7(CHG_EN)=1 -> battery charging on (official BSP: setChargeQcEnable/setChargeEnable(true)).
+      # P1, P2, P6 stay inputs (USB-C detect etc.).
+      output_io_mask: [0, 3, 4, 5, 7]
+      output_io_level_mask : [1, 1, 0, 0, 1]
+      output_io_mode_mask: [0, 0, 0, 0, 0]
+      input_io_mask: [1, 2, 6]
     peripherals:
       - name: i2c_master
         i2c_addr: 0x88         # I2C address of the IO expander
@@ -150,21 +159,12 @@ devices:
       - name: ldo_mipi
       - name: dsi_display
 
-  # Power Control for Touch Panel
-  - name: touch_power_ctrl
-    type: power_ctrl
-    sub_type: gpio
-    peripherals:
-      - name: gpio_power_touch
-        active_level: 0
-
   # Touch Panel Configuration
   - name: lcd_touch
     chip: tab5_touch                  # aggregate chip; bmgr probes both addresses
     type: lcd_touch
     sub_type: i2c
     depends_on: gpio_expander
-    power_ctrl_device: touch_power_ctrl
     version: default
     dependencies:
       esp_lcd_touch:
@@ -180,6 +180,11 @@ devices:
       touch_config:
         x_max: 720                        # Maximum X coordinate (BSP_LCD_H_RES)
         y_max: 1280                        # Maximum Y coordinate (BSP_LCD_V_RES)
+        # Official M5Tab5-UserDemo reads the touch controller on interrupt (INT = GPIO 23, active low).
+        # Pure polling hits an idle controller that does not answer on I2C ("Read advanced info failed").
+        int_gpio_num: 23
+        levels:
+          interrupt: 0
     peripherals:
       - name: i2c_master                   # I2C peripheral for touch communication
         i2c_addr: [0x28, 0xaa]             # 0x28=GT911(7b 0x14), 0xaa=ST7123(7b 0x55)

@@ -5,6 +5,10 @@
  */
 #include <sys/time.h>
 
+#include "driver/gpio.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 #include "esp_log.h"
 #include "private/utils.hpp"
 #include "brookesia/lib_utils.hpp"
@@ -45,9 +49,46 @@ static void sanitize_wall_clock(void)
     settimeofday(&tv, nullptr);
 }
 
+
+/**
+ * Lower the output drive strength of the Tab5 signals that run next to the backlight PWM, the DSI display
+ * and the SDIO link. Ported from the official M5Tab5-UserDemo (HalEsp32::set_gpio_output_capability).
+ *
+ * Without it, switching the backlight on made the ST7121/ST7123 touch controller stop answering on I2C
+ * and the ESP32-C6 SDIO handshake fail (sdmmc_init_ocr timeout) on our board.
+ */
+static void tab5_set_gpio_drive_capability(void)
+{
+    static const gpio_num_t TAB5_GPIOS[] = {
+        GPIO_NUM_0, GPIO_NUM_1,                                                                  // EXT I2C
+        GPIO_NUM_8, GPIO_NUM_9, GPIO_NUM_10, GPIO_NUM_11, GPIO_NUM_12, GPIO_NUM_13, GPIO_NUM_15, // ESP-Hosted C6
+        GPIO_NUM_22, GPIO_NUM_23,                                                                // backlight, TP_INT
+        GPIO_NUM_26, GPIO_NUM_27, GPIO_NUM_28, GPIO_NUM_29, GPIO_NUM_30,                         // audio
+        GPIO_NUM_31, GPIO_NUM_32,                                                                // system I2C
+        GPIO_NUM_39, GPIO_NUM_40, GPIO_NUM_41, GPIO_NUM_42, GPIO_NUM_43, GPIO_NUM_44,            // microSD
+    };
+    for (gpio_num_t gpio : TAB5_GPIOS) {
+        if (gpio_set_drive_capability(gpio, GPIO_DRIVE_CAP_0) != ESP_OK) {
+            ESP_LOGW("Main", "Failed to set drive capability of GPIO %d", static_cast<int>(gpio));
+        }
+    }
+}
+
+/* Drivers (ESP-Hosted SDIO, SD card) may re-initialise their pins later, so apply it again once boot settled. */
+static void tab5_drive_capability_task(void *)
+{
+    for (int delay_ms : {3000, 3000, 4000}) {
+        vTaskDelay(pdMS_TO_TICKS(delay_ms));
+        tab5_set_gpio_drive_capability();
+    }
+    vTaskDelete(nullptr);
+}
+
 extern "C" void app_main(void)
 {
     sanitize_wall_clock();
+    tab5_set_gpio_drive_capability();
+    xTaskCreate(tab5_drive_capability_task, "gpio_drv", 3072, nullptr, 2, nullptr);
 
     BROOKESIA_LOGI("\n\n=== Agent Chatbot Example ===\n");
 

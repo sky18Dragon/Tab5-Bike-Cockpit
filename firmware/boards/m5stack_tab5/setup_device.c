@@ -6,6 +6,10 @@
  */
 
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "driver/gpio.h"
+#include "driver/i2c_master.h"
 #include "esp_board_manager_includes.h"
 #include "esp_io_expander_pi4ioe5v6408.h"
 #include "esp_lcd_ili9881c.h"
@@ -124,6 +128,117 @@ static tab5_panel_variant_t detect_panel_variant(uint16_t touch_addr)
     return TAB5_PANEL_VARIANT_ST7123;
 }
 
+
+/* ---- PI4IOE5V6408 bring-up, ported from the official M5Tab5-UserDemo BSP (m5stack_tab5.c) ---------
+ *
+ * Why this exists: the stock esp_board_manager board drives LCD_RST (expander 0x43, P4) push-pull high,
+ * but the panel side has no 1.8 V pull-up, so the official BSP releases the reset by switching the pin
+ * to "input + pull-up" instead (their fix-lcd-rst change). It also resets both expanders first, resets
+ * the touch controller with the INT pin (GPIO 23) left floating, and enables charging (expander 0x44,
+ * P7). Without this the touch controller / panel were not reliably reachable after a warm reset.
+ */
+#define PI4IO_ADDR_0            0x43u   /* expander 0: SPK_EN, EXT5V_EN, LCD_RST, TP_RST, CAM_RST, HP detect */
+#define PI4IO_ADDR_1            0x44u   /* expander 1: WLAN_PWR_EN, USB5V_EN, QC_EN, CHG_EN, ...            */
+#define PI4IO_REG_CHIP_RESET    0x01u
+#define PI4IO_REG_IO_DIR        0x03u
+#define PI4IO_REG_OUT_SET       0x05u
+#define PI4IO_REG_OUT_H_IM      0x07u
+#define PI4IO_REG_IN_DEF_STA    0x09u
+#define PI4IO_REG_PULL_EN       0x0Bu
+#define PI4IO_REG_PULL_SEL      0x0Du
+#define PI4IO_REG_INT_MASK      0x11u
+#define PI4IO_I2C_TIMEOUT_MS    100
+#define TAB5_TP_INT_GPIO        GPIO_NUM_23
+
+static esp_err_t pi4io_write(i2c_master_dev_handle_t dev, uint8_t reg, uint8_t val)
+{
+    uint8_t buf[2] = {reg, val};
+    return i2c_master_transmit(dev, buf, sizeof(buf), PI4IO_I2C_TIMEOUT_MS);
+}
+
+static esp_err_t pi4io_read(i2c_master_dev_handle_t dev, uint8_t reg, uint8_t *val)
+{
+    return i2c_master_transmit_receive(dev, &reg, 1, val, 1, PI4IO_I2C_TIMEOUT_MS);
+}
+
+/* Expander 0: reset, safe idle levels, LCD reset released through input + pull-up, then touch reset. */
+static esp_err_t tab5_expander0_bringup(i2c_master_dev_handle_t dev)
+{
+    esp_err_t ret = ESP_OK;
+    uint8_t cur = 0;
+
+    ret |= pi4io_write(dev, PI4IO_REG_CHIP_RESET, 0xFF);
+    ret |= pi4io_read(dev, PI4IO_REG_CHIP_RESET, &cur);
+
+    ret |= pi4io_write(dev, PI4IO_REG_PULL_SEL, 0x7F);   /* P0..P6 pull-up */
+    ret |= pi4io_write(dev, PI4IO_REG_PULL_EN, 0x7F);
+    /* P1 SPK_EN=1, P2 EXT5V_EN=1, P5 TP_RST=1, P6 CAM_RST=1; P4 LCD_RST latched 0 so it never drives 3.3 V */
+    ret |= pi4io_write(dev, PI4IO_REG_OUT_SET, 0x66);
+    ret |= pi4io_write(dev, PI4IO_REG_OUT_H_IM, 0x00);
+    ret |= pi4io_write(dev, PI4IO_REG_IO_DIR, 0x7F);     /* P4 output low: assert LCD reset */
+    vTaskDelay(pdMS_TO_TICKS(10));
+    ret |= pi4io_write(dev, PI4IO_REG_IO_DIR, 0x6F);     /* P4 input + pull-up: release LCD reset */
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    /* Touch reset (official bsp_reset_tp): INT left floating, TP_RST and LCD_RST low, then release */
+    gpio_reset_pin(TAB5_TP_INT_GPIO);
+    ret |= pi4io_read(dev, PI4IO_REG_OUT_SET, &cur);
+    ret |= pi4io_write(dev, PI4IO_REG_OUT_SET, cur & (uint8_t)~((1u << 4) | (1u << 5)));
+    ret |= pi4io_read(dev, PI4IO_REG_IO_DIR, &cur);
+    ret |= pi4io_write(dev, PI4IO_REG_IO_DIR, cur | (1u << 4));
+    vTaskDelay(pdMS_TO_TICKS(100));
+    ret |= pi4io_read(dev, PI4IO_REG_OUT_SET, &cur);
+    ret |= pi4io_write(dev, PI4IO_REG_OUT_SET, (cur & (uint8_t)~(1u << 4)) | (1u << 5));
+    ret |= pi4io_read(dev, PI4IO_REG_IO_DIR, &cur);
+    ret |= pi4io_write(dev, PI4IO_REG_IO_DIR, cur & (uint8_t)~(1u << 4));
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    return (ret == ESP_OK) ? ESP_OK : ESP_FAIL;
+}
+
+/* Expander 1: reset and configure; P0 WLAN_PWR_EN=1, P3 USB5V_EN=1, P7 CHG_EN=0 here (charging is
+ * enabled later via the board YAML, matching the official setChargeEnable(true) after init). */
+static esp_err_t tab5_expander1_bringup(i2c_master_dev_handle_t dev)
+{
+    esp_err_t ret = ESP_OK;
+    uint8_t cur = 0;
+
+    ret |= pi4io_write(dev, PI4IO_REG_CHIP_RESET, 0xFF);
+    ret |= pi4io_read(dev, PI4IO_REG_CHIP_RESET, &cur);
+    ret |= pi4io_write(dev, PI4IO_REG_IO_DIR, 0xB9);     /* 1 = output: P0 P3 P4 P5 P7; input: P1 P2 P6 */
+    ret |= pi4io_write(dev, PI4IO_REG_OUT_H_IM, 0x06);
+    ret |= pi4io_write(dev, PI4IO_REG_PULL_SEL, 0xB9);
+    ret |= pi4io_write(dev, PI4IO_REG_PULL_EN, 0xF9);
+    ret |= pi4io_write(dev, PI4IO_REG_IN_DEF_STA, 0x40);
+    ret |= pi4io_write(dev, PI4IO_REG_INT_MASK, 0xBF);
+    ret |= pi4io_write(dev, PI4IO_REG_OUT_SET, 0x09);
+
+    return (ret == ESP_OK) ? ESP_OK : ESP_FAIL;
+}
+
+static void tab5_expander_bringup(i2c_master_bus_handle_t bus, uint16_t dev_addr)
+{
+    if ((dev_addr != PI4IO_ADDR_0) && (dev_addr != PI4IO_ADDR_1)) {
+        return;
+    }
+
+    const i2c_device_config_t cfg = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = dev_addr,
+        .scl_speed_hz = 400000,
+    };
+    i2c_master_dev_handle_t dev = NULL;
+    esp_err_t ret = i2c_master_bus_add_device(bus, &cfg, &dev);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Expander 0x%02x: add device failed: %s", dev_addr, esp_err_to_name(ret));
+        return;
+    }
+
+    ret = (dev_addr == PI4IO_ADDR_0) ? tab5_expander0_bringup(dev) : tab5_expander1_bringup(dev);
+    ESP_LOGI(TAG, "Expander 0x%02x bring-up %s", dev_addr, (ret == ESP_OK) ? "done" : "had I2C errors");
+    i2c_master_bus_rm_device(dev);
+}
+
 esp_err_t io_expander_factory_entry_t(i2c_master_bus_handle_t i2c_handle,
                                       const uint16_t dev_addr,
                                       esp_io_expander_handle_t *handle_ret)
@@ -131,8 +246,15 @@ esp_err_t io_expander_factory_entry_t(i2c_master_bus_handle_t i2c_handle,
     esp_err_t ret = esp_io_expander_new_i2c_pi4ioe5v6408(i2c_handle, dev_addr, handle_ret);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to create IO expander: %s", esp_err_to_name(ret));
+        return ret;
     }
-    return ret;
+
+    /* The driver's constructor resets the chip and leaves every pin Hi-Z with a pull-down, which holds
+     * LCD_RST and TP_RST low. Run the official bring-up *after* it so the reset lines end up released
+     * the way the official BSP does (LCD_RST as input + pull-up, never push-pull). The driver reads the
+     * registers from the chip on every call, so it follows the new state. */
+    tab5_expander_bringup(i2c_handle, dev_addr);
+    return ESP_OK;
 }
 
 esp_err_t lcd_dsi_panel_factory_entry_t(esp_lcd_dsi_bus_handle_t dsi_handle,

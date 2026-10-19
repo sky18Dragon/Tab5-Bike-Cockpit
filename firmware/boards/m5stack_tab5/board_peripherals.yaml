@@ -77,11 +77,13 @@ peripherals:
       duty_resolution: LEDC_TIMER_10_BIT
       freq_hz: 5000
 
-  # Touch panel power control
-  - name: gpio_power_touch
+  # Placeholder GPIO peripheral (not referenced by any device, so it is never initialised).
+  # It only makes board manager generate the periph_gpio types that the Brookesia HAL adaptor
+  # (audio codec_player PA control) compiles against. GPIO 23 (TP_INT) must stay floating, see setup_device.c.
+  - name: gpio_placeholder
     type: gpio
     config:
       pin: 23
-      mode: GPIO_MODE_OUTPUT
-      pull_up: true
-      default_level: 1
+      mode: GPIO_MODE_INPUT
+      pull_up: false
+      default_level: 0
