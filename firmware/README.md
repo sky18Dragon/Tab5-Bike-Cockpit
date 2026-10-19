@@ -36,7 +36,7 @@ idf.py -p /dev/cu.usbmodemXXXX flash monitor
 | 麦克风 | 通道布局暂用 `RMNN`(参考通道 + 单麦),双麦布局待核对 ES7210 通道顺序(docs/06 的 T18) |
 | 唤醒词 | 见 `sdkconfig.defaults.esp32p4` |
 | 摄像头 | 板级配置里已去掉,P2 再加 |
-| 实机验证 | 未做(开发机未连接 Tab5) |
+| 实机验证 | 已烧录并稳定启动,见 [docs/07-M1-进展.md](../docs/07-M1-进展.md);语音对话与人工确认项未做 |
 
 ## 目录
 

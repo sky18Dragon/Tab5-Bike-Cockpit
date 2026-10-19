@@ -3,6 +3,8 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
+#include <sys/time.h>
+
 #include "esp_log.h"
 #include "private/utils.hpp"
 #include "brookesia/lib_utils.hpp"
@@ -17,8 +19,36 @@
 
 using namespace esp_brookesia;
 
+/**
+ * Sanitise the wall clock before any worker thread starts.
+ *
+ * After a USB-triggered reset (CHIP_USB_UART_RESET, e.g. right after flashing) the RTC-retained boot
+ * time is not cleared, so the wall clock can come up with a garbage value. Seen on Tab5: year ~2048,
+ * tv_sec > INT32_MAX. With such a value boost's interruptible sleep (used by the Brookesia
+ * TaskScheduler workers) returns immediately and spins, which starves IDLE0 and trips the task
+ * watchdog right after "All services added". SNTP corrects the time later.
+ */
+static void sanitize_wall_clock(void)
+{
+    constexpr time_t VALID_MIN = 1767225600;  // 2026-01-01 00:00:00 UTC
+    constexpr time_t VALID_MAX = 2147483647;  // INT32_MAX, 2038-01-19
+
+    struct timeval tv {};
+    gettimeofday(&tv, nullptr);
+    if ((tv.tv_sec >= VALID_MIN) && (tv.tv_sec <= VALID_MAX)) {
+        return;
+    }
+
+    ESP_LOGW("Main", "Wall clock out of range (%lld), resetting to 2026-01-01", static_cast<long long>(tv.tv_sec));
+    tv.tv_sec = VALID_MIN;
+    tv.tv_usec = 0;
+    settimeofday(&tv, nullptr);
+}
+
 extern "C" void app_main(void)
 {
+    sanitize_wall_clock();
+
     BROOKESIA_LOGI("\n\n=== Agent Chatbot Example ===\n");
 
     // Set log level to warning for some components to reduce log output
