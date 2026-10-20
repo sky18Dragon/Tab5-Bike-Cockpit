@@ -19,6 +19,7 @@
 #include "esp_lcd_touch_gt911.h"
 #include "esp_lcd_touch_st7123.h"
 #include "disp_init_data.h"
+#include "st7121_init_data.h"
 
 static const char *TAG = "M5STACK_TAB5_SETUP_DEVICE";
 
@@ -131,11 +132,14 @@ static tab5_panel_variant_t detect_panel_variant(uint16_t touch_addr)
 
 /* ---- PI4IOE5V6408 bring-up, ported from the official M5Tab5-UserDemo BSP (m5stack_tab5.c) ---------
  *
- * Why this exists: the stock esp_board_manager board drives LCD_RST (expander 0x43, P4) push-pull high,
- * but the panel side has no 1.8 V pull-up, so the official BSP releases the reset by switching the pin
- * to "input + pull-up" instead (their fix-lcd-rst change). It also resets both expanders first, resets
- * the touch controller with the INT pin (GPIO 23) left floating, and enables charging (expander 0x44,
- * P7). Without this the touch controller / panel were not reliably reachable after a warm reset.
+ * Why this exists: the stock esp_board_manager board never resets the touch controller, so after a cold
+ * start the ST712x touch was not found and the whole display init was aborted. The official BSP resets
+ * both expanders, then pulses LCD_RST and TP_RST low together with the touch INT pin (GPIO 23) floating,
+ * and enables charging (expander 0x44, P7).
+ *
+ * LCD_RST (expander 0x43, P4) is driven push-pull high, as in the released factory firmware (UserDemo
+ * V0.4). UserDemo master (fix-lcd-rst, not released yet) releases it as "input + pull-up" instead; on our
+ * unit every firmware that did so left the panel black, see docs/08.
  */
 #define PI4IO_ADDR_0            0x43u   /* expander 0: SPK_EN, EXT5V_EN, LCD_RST, TP_RST, CAM_RST, HP detect */
 #define PI4IO_ADDR_1            0x44u   /* expander 1: WLAN_PWR_EN, USB5V_EN, QC_EN, CHG_EN, ...            */
@@ -147,6 +151,11 @@ static tab5_panel_variant_t detect_panel_variant(uint16_t touch_addr)
 #define PI4IO_REG_PULL_EN       0x0Bu
 #define PI4IO_REG_PULL_SEL      0x0Du
 #define PI4IO_REG_INT_MASK      0x11u
+#define TAB5_LCD_RST_PIN        4       /* expander 0, P4 */
+#define TAB5_TP_RST_PIN         5       /* expander 0, P5 */
+/* Extra wait before the first DCS command, on top of the 100 ms after the reset pulse. The factory
+ * firmware has other init in between; Espressif's esp-bsp waits 500 ms. */
+#define TAB5_LCD_RESET_SETTLE_MS 500
 #define PI4IO_I2C_TIMEOUT_MS    100
 #define TAB5_TP_INT_GPIO        GPIO_NUM_23
 
@@ -161,7 +170,8 @@ static esp_err_t pi4io_read(i2c_master_dev_handle_t dev, uint8_t reg, uint8_t *v
     return i2c_master_transmit_receive(dev, &reg, 1, val, 1, PI4IO_I2C_TIMEOUT_MS);
 }
 
-/* Expander 0: reset, safe idle levels, LCD reset released through input + pull-up, then touch reset. */
+/* Expander 0, following UserDemo V0.4 (bsp_io_expander_pi4ioe_init + bsp_reset_tp): reset the chip, all
+ * used pins push-pull outputs, then LCD_RST and TP_RST low for 100 ms and high again. */
 static esp_err_t tab5_expander0_bringup(i2c_master_dev_handle_t dev)
 {
     esp_err_t ret = ESP_OK;
@@ -169,28 +179,19 @@ static esp_err_t tab5_expander0_bringup(i2c_master_dev_handle_t dev)
 
     ret |= pi4io_write(dev, PI4IO_REG_CHIP_RESET, 0xFF);
     ret |= pi4io_read(dev, PI4IO_REG_CHIP_RESET, &cur);
-
-    ret |= pi4io_write(dev, PI4IO_REG_PULL_SEL, 0x7F);   /* P0..P6 pull-up */
+    ret |= pi4io_write(dev, PI4IO_REG_IO_DIR, 0x7F);     /* P0..P6 output, P7 (HP detect) input */
+    ret |= pi4io_write(dev, PI4IO_REG_OUT_H_IM, 0x00);   /* no pin left high-impedance */
+    ret |= pi4io_write(dev, PI4IO_REG_PULL_SEL, 0x7F);
     ret |= pi4io_write(dev, PI4IO_REG_PULL_EN, 0x7F);
-    /* P1 SPK_EN=1, P2 EXT5V_EN=1, P5 TP_RST=1, P6 CAM_RST=1; P4 LCD_RST latched 0 so it never drives 3.3 V */
-    ret |= pi4io_write(dev, PI4IO_REG_OUT_SET, 0x66);
-    ret |= pi4io_write(dev, PI4IO_REG_OUT_H_IM, 0x00);
-    ret |= pi4io_write(dev, PI4IO_REG_IO_DIR, 0x7F);     /* P4 output low: assert LCD reset */
-    vTaskDelay(pdMS_TO_TICKS(10));
-    ret |= pi4io_write(dev, PI4IO_REG_IO_DIR, 0x6F);     /* P4 input + pull-up: release LCD reset */
-    vTaskDelay(pdMS_TO_TICKS(50));
+    ret |= pi4io_write(dev, PI4IO_REG_OUT_SET, 0x76);    /* P1 SPK_EN, P2 EXT5V_EN, P4 LCD_RST, P5 TP_RST, P6 CAM_RST */
 
-    /* Touch reset (official bsp_reset_tp): INT left floating, TP_RST and LCD_RST low, then release */
+    /* bsp_reset_tp: INT left floating, LCD_RST and TP_RST low for 100 ms, then high */
     gpio_reset_pin(TAB5_TP_INT_GPIO);
     ret |= pi4io_read(dev, PI4IO_REG_OUT_SET, &cur);
-    ret |= pi4io_write(dev, PI4IO_REG_OUT_SET, cur & (uint8_t)~((1u << 4) | (1u << 5)));
-    ret |= pi4io_read(dev, PI4IO_REG_IO_DIR, &cur);
-    ret |= pi4io_write(dev, PI4IO_REG_IO_DIR, cur | (1u << 4));
+    ret |= pi4io_write(dev, PI4IO_REG_OUT_SET, cur & (uint8_t)~((1u << TAB5_LCD_RST_PIN) | (1u << TAB5_TP_RST_PIN)));
     vTaskDelay(pdMS_TO_TICKS(100));
     ret |= pi4io_read(dev, PI4IO_REG_OUT_SET, &cur);
-    ret |= pi4io_write(dev, PI4IO_REG_OUT_SET, (cur & (uint8_t)~(1u << 4)) | (1u << 5));
-    ret |= pi4io_read(dev, PI4IO_REG_IO_DIR, &cur);
-    ret |= pi4io_write(dev, PI4IO_REG_IO_DIR, cur & (uint8_t)~(1u << 4));
+    ret |= pi4io_write(dev, PI4IO_REG_OUT_SET, cur | (1u << TAB5_LCD_RST_PIN) | (1u << TAB5_TP_RST_PIN));
     vTaskDelay(pdMS_TO_TICKS(100));
 
     return (ret == ESP_OK) ? ESP_OK : ESP_FAIL;
@@ -251,8 +252,8 @@ esp_err_t io_expander_factory_entry_t(i2c_master_bus_handle_t i2c_handle,
 
     /* The driver's constructor resets the chip and leaves every pin Hi-Z with a pull-down, which holds
      * LCD_RST and TP_RST low. Run the official bring-up *after* it so the reset lines end up released
-     * the way the official BSP does (LCD_RST as input + pull-up, never push-pull). The driver reads the
-     * registers from the chip on every call, so it follows the new state. */
+     * the way the factory firmware does. The YAML lists P4 as an output at level 1, so the driver's later
+     * writes of its cached output register keep LCD_RST high. */
     tab5_expander_bringup(i2c_handle, dev_addr);
     return ESP_OK;
 }
@@ -261,6 +262,8 @@ esp_err_t lcd_dsi_panel_factory_entry_t(esp_lcd_dsi_bus_handle_t dsi_handle,
                                         dev_display_lcd_config_t *lcd_cfg,
                                         dev_display_lcd_handles_t *lcd_handles)
 {
+    vTaskDelay(pdMS_TO_TICKS(TAB5_LCD_RESET_SETTLE_MS));
+
     uint16_t touch_addr = 0;
     esp_err_t ret = esp_board_device_get_i2c_effective_addr("lcd_touch", &touch_addr);
     if (ret != ESP_OK) {
@@ -295,8 +298,8 @@ esp_err_t lcd_dsi_panel_factory_entry_t(esp_lcd_dsi_bus_handle_t dsi_handle,
     if (panel_variant == TAB5_PANEL_VARIANT_ST7121) {
         ESP_LOGI(TAG, "Tab5 panel variant: ST7121");
         st7121_vendor_config_t vendor = {
-            .init_cmds = NULL,
-            .init_cmds_size = 0,
+            .init_cmds = tab5_st7121_init_cmds,
+            .init_cmds_size = sizeof(tab5_st7121_init_cmds) / sizeof(tab5_st7121_init_cmds[0]),
             .mipi_config = {
                 .dsi_bus = dsi_handle,
                 .dpi_config = &local.sub_cfg.dsi.dpi_config,

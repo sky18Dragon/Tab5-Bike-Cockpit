@@ -77,12 +77,13 @@ devices:
       espressif/esp_io_expander_pi4ioe5v6408: "*"
     config:
       max_pins: 8
-      # P1(SPK_EN), P2(EXT5V_EN), P5(TP_RST), P6(CAM_RST) are outputs.
-      # P4 (LCD_RST) is deliberately NOT listed: the panel side has no 1.8 V pull-up, so it must never be
-      # driven push-pull high. setup_device.c releases it as "input + pull-up" (official BSP sequence).
-      output_io_mask: [0, 1, 2, 3, 5, 6]
-      output_io_level_mask : [0, 1, 1, 0, 1, 1]
-      output_io_mode_mask: [0, 0, 0, 0, 0, 0]
+      # P1(SPK_EN), P2(EXT5V_EN), P4(LCD_RST), P5(TP_RST), P6(CAM_RST) are outputs, all driven high.
+      # LCD_RST is held push-pull high like the released factory firmware (UserDemo V0.4). Releasing it as
+      # "input + pull-up" (UserDemo master, fix-lcd-rst, not released) left the screen black on our unit,
+      # see docs/08. It must stay listed here: the driver rewrites the whole output register from its cache.
+      output_io_mask: [0, 1, 2, 3, 4, 5, 6]
+      output_io_level_mask : [0, 1, 1, 0, 1, 1, 1]
+      output_io_mode_mask: [0, 0, 0, 0, 0, 0, 0]
       input_io_mask: [7]  # P7(HEAD_PHONE_DET)
     peripherals:
       - name: i2c_master

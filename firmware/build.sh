@@ -30,11 +30,17 @@ case "${1:-build}" in
         ;;
 esac
 
-if [[ ! -d components/gen_bmgr_codes ]]; then
+# Regenerate the board code when it is missing or any board file changed since it was generated;
+# otherwise YAML edits are silently ignored.
+GEN_STAMP=components/gen_bmgr_codes/gen_board_device_config.c
+if [[ ! -f "$GEN_STAMP" ]] || [[ -n "$(find "boards/$BOARD" -type f -newer "$GEN_STAMP" -print -quit)" ]]; then
+    # gen-bmgr-config moves sdkconfig away and drops build/CMakeCache.txt, so set-target runs below
     idf.py gen-bmgr-config -c ./boards -b "$BOARD"
 fi
 
 if [[ ! -f sdkconfig ]]; then
+    # set-target's fullclean refuses a build directory without CMakeCache.txt, so start from scratch
+    rm -rf build
     idf.py set-target esp32p4
 fi
 

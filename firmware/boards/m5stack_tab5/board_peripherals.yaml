@@ -62,7 +62,10 @@ peripherals:
       bus_id: 0
       data_lanes: 2
       phy_clk_src: 0
-      lane_bit_rate_mbps: 965     # compromise rate for both ILI9881C and ST7123 panels
+      # DSI lane rate: M5GFX and espp use 900 Mbps for ST7121 (965-1040 for ST7123, 730 for ILI9881C); the
+      # factory firmware and the upstream board use 965. Our ST7121 unit has shown a picture at both 965
+      # and 900; 900 is what the current, verified firmware uses.
+      lane_bit_rate_mbps: 900
 
   # Backlight Control
   - name: ledc_backlight
